@@ -6,8 +6,10 @@ import (
 	"io"
 	"net/http"
 	"regexp"
+	"time"
 
 	"github.com/sipeed/picoclaw/pkg/config"
+	"github.com/sipeed/picoclaw/pkg/logger"
 )
 
 // registerConfigRoutes binds configuration management endpoints to the ServeMux.
@@ -67,6 +69,9 @@ func (h *Handler) handleUpdateConfig(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, fmt.Sprintf("Failed to save config: %v", err), http.StatusInternalServerError)
 		return
 	}
+
+	// Trigger gateway reload to apply changes to running channels
+	go h.triggerGatewayReload()
 
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]string{"status": "ok"})
@@ -155,6 +160,9 @@ func (h *Handler) handlePatchConfig(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Trigger gateway reload to apply changes to running channels
+	go h.triggerGatewayReload()
+
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]string{"status": "ok"})
 }
@@ -230,5 +238,43 @@ func mergeMap(dst, src map[string]any) {
 		} else {
 			dst[key] = srcVal
 		}
+	}
+}
+
+// triggerGatewayReload sends a reload request to the gateway's health server.
+// This notifies the running gateway to reload its configuration from disk.
+// Errors are logged but not returned, as the config save itself succeeded.
+func (h *Handler) triggerGatewayReload() {
+	cfg, err := config.LoadConfig(h.configPath)
+	if err != nil {
+		logger.WarnCF("config", "Failed to load config for gateway reload", map[string]any{
+			"error": err.Error(),
+		})
+		return
+	}
+
+	port := 18790
+	if cfg.Gateway.Port != 0 {
+		port = cfg.Gateway.Port
+	}
+
+	url := fmt.Sprintf("http://127.0.0.1:%d/reload", port)
+	client := &http.Client{Timeout: 5 * time.Second}
+
+	resp, err := client.Post(url, "application/json", nil)
+	if err != nil {
+		logger.DebugCF("config", "Gateway reload request failed (gateway may not be running)", map[string]any{
+			"error": err.Error(),
+		})
+		return
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode == http.StatusOK {
+		logger.InfoCF("config", "Gateway config reload triggered", nil)
+	} else {
+		logger.DebugCF("config", "Gateway reload returned non-OK status", map[string]any{
+			"status": resp.Status,
+		})
 	}
 }
